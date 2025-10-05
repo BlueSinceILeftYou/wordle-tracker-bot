@@ -1,1 +1,4 @@
 __pycache__/
+wordle_data.json
+user_stats.json
+config.json
