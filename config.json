@@ -1,0 +1,12 @@
+{
+  "command_prefix": "!",
+  "data_files": {
+    "wordle_data": "wordle_data.json",
+    "user_stats": "user_stats.json"
+  },
+  "settings": {
+    "max_recent_days": 30,
+    "default_recent_days": 7,
+    "auto_save": true
+  }
+}
