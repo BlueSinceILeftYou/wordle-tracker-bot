@@ -7,8 +7,62 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import statistics
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+def get_connection():
+    """Get a connection to the PostgreSQL database"""
+    return psycopg2.connect(os.getenv("DATABASE_URL"))
+
+def init_db():
+    """Initialize the database tables"""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Create wordle_scores table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS wordle_scores (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        date DATE NOT NULL,
+        is_winner BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(guild_id, username, date)
+    )
+    """)
+
+    # Create user_stats table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_stats (
+        guild_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        total_score INTEGER DEFAULT 0,
+        games_played INTEGER DEFAULT 0,
+        wins INTEGER DEFAULT 0,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (guild_id, username)
+    )
+    """)
+
+    # Create indexes for better performance
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_wordle_scores_guild_date 
+    ON wordle_scores(guild_id, date)
+    """)
+    
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_wordle_scores_guild_user 
+    ON wordle_scores(guild_id, username)
+    """)
+
+    conn.commit()
+    conn.close()
+
 
 Bot_Token = os.getenv("bot_token")
+
 
 # Load configuration
 try:
@@ -38,43 +92,140 @@ class WordleScore:
 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=discord.Intents.all())
 
-# Data storage
-wordle_data = {}  # Will store: {date: [WordleScore objects]}
-user_stats = {}   # Will store: {user: {"total_score": int, "games_played": int, "wins": int}}
+def save_wordle_scores(guild_id: str, scores: List[WordleScore]):
+    """Save Wordle scores to the database"""
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    for score in scores:
+        try:
+            cur.execute("""
+                INSERT INTO wordle_scores (guild_id, username, score, date, is_winner)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (guild_id, username, date) 
+                DO UPDATE SET 
+                    score = EXCLUDED.score,
+                    is_winner = EXCLUDED.is_winner,
+                    created_at = CURRENT_TIMESTAMP
+            """, (guild_id, score.user, score.score, score.date, score.is_winner))
+        except Exception as e:
+            print(f"Error saving score for {score.user}: {e}")
+    
+    conn.commit()
+    conn.close()
 
-def load_data():
-    """Load existing data from JSON files"""
-    global wordle_data, user_stats
-    try:
-        with open(DATA_FILES["wordle_data"], 'r') as f:
-            data = json.load(f)
-            wordle_data = {}
-            for date, scores in data.items():
-                wordle_data[date] = [WordleScore(**score) for score in scores]
-    except FileNotFoundError:
-        wordle_data = {}
+def update_user_stats(guild_id: str, scores: List[WordleScore]):
+    """Update cumulative user statistics in the database"""
+    conn = get_connection()
+    cur = conn.cursor()
     
-    try:
-        with open(DATA_FILES["user_stats"], 'r') as f:
-            user_stats = json.load(f)
-    except FileNotFoundError:
-        user_stats = {}
+    for score in scores:
+        try:
+            # Insert or update user stats
+            cur.execute("""
+                INSERT INTO user_stats (guild_id, username, total_score, games_played, wins)
+                VALUES (%s, %s, %s, 1, %s)
+                ON CONFLICT (guild_id, username)
+                DO UPDATE SET
+                    total_score = user_stats.total_score + %s,
+                    games_played = user_stats.games_played + 1,
+                    wins = user_stats.wins + %s,
+                    last_updated = CURRENT_TIMESTAMP
+            """, (guild_id, score.user, score.score, 1 if score.is_winner else 0, 
+                  score.score, 1 if score.is_winner else 0))
+        except Exception as e:
+            print(f"Error updating stats for {score.user}: {e}")
+    
+    conn.commit()
+    conn.close()
 
-def save_data():
-    """Save data to JSON files"""
-    if not SETTINGS["auto_save"]:
-        return
-        
-    # Convert WordleScore objects to dictionaries for JSON serialization
-    data_to_save = {}
-    for date, scores in wordle_data.items():
-        data_to_save[date] = [score.__dict__ for score in scores]
+def get_user_stats(guild_id: str, username: str = None) -> Dict:
+    """Get user statistics from the database"""
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    with open(DATA_FILES["wordle_data"], 'w') as f:
-        json.dump(data_to_save, f, indent=2)
+    if username:
+        cur.execute("""
+            SELECT * FROM user_stats 
+            WHERE guild_id = %s AND username = %s
+        """, (guild_id, username))
+        result = cur.fetchone()
+        conn.close()
+        return dict(result) if result else {}
+    else:
+        cur.execute("""
+            SELECT * FROM user_stats 
+            WHERE guild_id = %s
+            ORDER BY (total_score::float / GREATEST(games_played, 1)) ASC
+        """, (guild_id,))
+        results = cur.fetchall()
+        conn.close()
+        return [dict(row) for row in results]
+
+def get_user_average(guild_id: str, username: str) -> float:
+    """Get a user's average score from the database"""
+    stats = get_user_stats(guild_id, username)
+    if not stats or stats.get("games_played", 0) == 0:
+        return 0.0
+    return stats["total_score"] / stats["games_played"]
+
+def get_daily_scores(guild_id: str, date: str) -> List[WordleScore]:
+    """Get all scores for a specific date from the database"""
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    with open(DATA_FILES["user_stats"], 'w') as f:
-        json.dump(user_stats, f, indent=2)
+    cur.execute("""
+        SELECT username, score, date, is_winner
+        FROM wordle_scores 
+        WHERE guild_id = %s AND date = %s
+        ORDER BY score ASC, username ASC
+    """, (guild_id, date))
+    
+    results = cur.fetchall()
+    conn.close()
+    
+    return [WordleScore(
+        user=row['username'],
+        score=row['score'],
+        date=str(row['date']),
+        is_winner=row['is_winner']
+    ) for row in results]
+
+def get_daily_stats(guild_id: str, date: str) -> Dict:
+    """Get statistics for a specific date from the database"""
+    scores = get_daily_scores(guild_id, date)
+    
+    if not scores:
+        return {}
+    
+    score_values = [s.score for s in scores]
+    
+    return {
+        "average": sum(score_values) / len(score_values),
+        "median": sorted(score_values)[len(score_values) // 2],
+        "best_score": min(score_values),
+        "worst_score": max(score_values),
+        "total_players": len(scores)
+    }
+
+def get_recent_dates(guild_id: str, days: int) -> List[str]:
+    """Get dates that have data within the specified number of days"""
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT DISTINCT date
+        FROM wordle_scores 
+        WHERE guild_id = %s 
+        AND date >= CURRENT_DATE - INTERVAL '%s days'
+        ORDER BY date DESC
+    """, (guild_id, days))
+    
+    results = cur.fetchall()
+    conn.close()
+    
+    return [str(row[0]) for row in results]
+
 
 def parse_wordle_message(message_content: str) -> Optional[tuple]:
     """Parse the Wordle bot message and extract scores"""
@@ -111,45 +262,11 @@ def parse_wordle_message(message_content: str) -> Optional[tuple]:
     
     return scores if scores else None
 
-def update_user_stats(scores: List[WordleScore]):
-    """Update cumulative user statistics"""
-    for score in scores:
-        user = score.user
-        if user not in user_stats:
-            user_stats[user] = {"total_score": 0, "games_played": 0, "wins": 0}
-        
-        user_stats[user]["total_score"] += score.score
-        user_stats[user]["games_played"] += 1
-        if score.is_winner:
-            user_stats[user]["wins"] += 1
-
-def get_user_average(user: str) -> float:
-    """Get a user's average score"""
-    if user not in user_stats or user_stats[user]["games_played"] == 0:
-        return 0.0
-    return user_stats[user]["total_score"] / user_stats[user]["games_played"]
-
-def get_daily_stats(date: str) -> Dict:
-    """Get statistics for a specific date"""
-    if date not in wordle_data:
-        return {}
-    
-    scores = wordle_data[date]
-    score_values = [s.score for s in scores]
-    
-    return {
-        "average": statistics.mean(score_values) if score_values else 0,
-        "median": statistics.median(score_values) if score_values else 0,
-        "best_score": min(score_values) if score_values else 0,
-        "worst_score": max(score_values) if score_values else 0,
-        "total_players": len(scores)
-    }
-
 
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} is online and ready!")
-    load_data()
+    init_db()  # Initialize database when bot starts
 
 @bot.command()
 async def ping(ctx):
@@ -161,39 +278,42 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
-    # Check if this is a Wordle bot message (you may need to adjust this condition)
-    # You can check by bot name, user ID, or message content pattern
+    # Check if this is a Wordle bot message
     if "Your group is on a" in message.content and "day streak!" in message.content:
         scores = parse_wordle_message(message.content)
         if scores:
-            date = scores[0].date  # All scores will have the same date
-            wordle_data[date] = scores
-            update_user_stats(scores)
-            save_data()
+            guild_id = str(message.guild.id) if message.guild else "DM"
+            
+            # Save scores and update stats
+            save_wordle_scores(guild_id, scores)
+            update_user_stats(guild_id, scores)
             
             # Send confirmation message
+            date = scores[0].date  # All scores will have the same date
             await message.channel.send(f"📊 Recorded {len(scores)} Wordle scores for {date}!")
     
     # Process other commands
     await bot.process_commands(message)
 
 
+
 @bot.command()
 async def stats(ctx, user: str = None):
     """Show user statistics"""
+    guild_id = str(ctx.guild.id) if ctx.guild else "DM"
+    
     if user is None:
         # Show overall statistics
         embed = discord.Embed(title="📊 Overall Wordle Statistics", color=0x00ff00)
         
-        if not user_stats:
+        all_stats = get_user_stats(guild_id)
+        if not all_stats:
             embed.add_field(name="No Data", value="No Wordle scores recorded yet!", inline=False)
         else:
-            # Sort users by average score
-            sorted_users = sorted(user_stats.items(), key=lambda x: get_user_average(x[0]))
-            
             leaderboard = ""
-            for i, (username, stats) in enumerate(sorted_users[:10], 1):
-                avg = get_user_average(username)
+            for i, stats in enumerate(all_stats[:10], 1):
+                username = stats["username"]
+                avg = stats["total_score"] / stats["games_played"] if stats["games_played"] > 0 else 0
                 win_rate = (stats["wins"] / stats["games_played"] * 100) if stats["games_played"] > 0 else 0
                 leaderboard += f"{i}. **{username}**: {avg:.2f} avg ({stats['games_played']} games, {win_rate:.1f}% wins)\n"
             
@@ -202,12 +322,12 @@ async def stats(ctx, user: str = None):
         await ctx.send(embed=embed)
     else:
         # Show specific user statistics
-        if user not in user_stats:
+        stats_data = get_user_stats(guild_id, user)
+        if not stats_data:
             await ctx.send(f"No data found for user: {user}")
             return
         
-        stats_data = user_stats[user]
-        avg = get_user_average(user)
+        avg = stats_data["total_score"] / stats_data["games_played"] if stats_data["games_played"] > 0 else 0
         win_rate = (stats_data["wins"] / stats_data["games_played"] * 100) if stats_data["games_played"] > 0 else 0
         
         embed = discord.Embed(title=f"📊 {user}'s Wordle Statistics", color=0x00ff00)
@@ -221,15 +341,17 @@ async def stats(ctx, user: str = None):
 @bot.command()
 async def daily(ctx, date: str = None):
     """Show daily statistics"""
+    guild_id = str(ctx.guild.id) if ctx.guild else "DM"
+    
     if date is None:
         date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     
-    if date not in wordle_data:
+    scores = get_daily_scores(guild_id, date)
+    if not scores:
         await ctx.send(f"No data found for {date}")
         return
     
-    daily_stats = get_daily_stats(date)
-    scores = wordle_data[date]
+    daily_stats = get_daily_stats(guild_id, date)
     
     embed = discord.Embed(title=f"📅 Daily Stats for {date}", color=0x0099ff)
     embed.add_field(name="Players", value=daily_stats["total_players"], inline=True)
@@ -256,16 +378,18 @@ async def daily(ctx, date: str = None):
 @bot.command()
 async def relative(ctx, date: str = None):
     """Show how users performed relative to the daily average"""
+    guild_id = str(ctx.guild.id) if ctx.guild else "DM"
+    
     if date is None:
         date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     
-    if date not in wordle_data:
+    scores = get_daily_scores(guild_id, date)
+    if not scores:
         await ctx.send(f"No data found for {date}")
         return
     
-    daily_stats = get_daily_stats(date)
+    daily_stats = get_daily_stats(guild_id, date)
     daily_avg = daily_stats["average"]
-    scores = wordle_data[date]
     
     embed = discord.Embed(title=f"📈 Relative Performance for {date}", color=0xff9900)
     embed.add_field(name="Daily Average", value=f"{daily_avg:.2f}", inline=False)
@@ -273,7 +397,7 @@ async def relative(ctx, date: str = None):
     # Calculate relative performance
     relative_scores = []
     for score in scores:
-        user_avg = get_user_average(score.user)
+        user_avg = get_user_average(guild_id, score.user)
         relative_to_daily = score.score - daily_avg
         relative_to_personal = score.score - user_avg
         relative_scores.append((score.user, score.score, relative_to_daily, relative_to_personal))
@@ -294,18 +418,14 @@ async def relative(ctx, date: str = None):
 @bot.command()
 async def recent(ctx, days: int = None):
     """Show recent performance trends"""
+    guild_id = str(ctx.guild.id) if ctx.guild else "DM"
+    
     if days is None:
         days = SETTINGS["default_recent_days"]
     if days > SETTINGS["max_recent_days"]:
         days = SETTINGS["max_recent_days"]
     
-    recent_dates = []
-    start_date = datetime.now() - timedelta(days=days)
-    
-    for i in range(days):
-        check_date = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
-        if check_date in wordle_data:
-            recent_dates.append(check_date)
+    recent_dates = get_recent_dates(guild_id, days)
     
     if not recent_dates:
         await ctx.send(f"No data found for the last {days} days")
@@ -316,7 +436,8 @@ async def recent(ctx, days: int = None):
     # Calculate trends for each user
     user_trends = {}
     for date in recent_dates:
-        for score in wordle_data[date]:
+        scores = get_daily_scores(guild_id, date)
+        for score in scores:
             if score.user not in user_trends:
                 user_trends[score.user] = []
             user_trends[score.user].append(score.score)
@@ -351,5 +472,5 @@ if __name__ == "__main__":
     bot.run(Bot_Token)
 
 if __name__ == "__main__":
-    load_data()  # Load existing data when bot starts
+    init_db()   # Load existing data when bot starts
     bot.run(Bot_Token)

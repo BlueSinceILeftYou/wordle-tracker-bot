@@ -1,95 +1,173 @@
-# Wordle Tracker Bot
+# Wordle Tracker Bot - PostgreSQL Version
 
-This Discord bot tracks Wordle scores from a group chat and provides statistics and analytics.
+A Discord bot that automatically tracks Wordle scores from group chat messages and provides comprehensive statistics and analytics.
 
 ## Features
 
-- **Automatic Score Tracking**: Parses messages from the Wordle bot to extract daily scores
-- **User Statistics**: Tracks cumulative performance, averages, and win rates
-- **Daily Analysis**: Shows daily statistics and score breakdowns
+### 🎯 **Automatic Score Tracking**
+- Monitors group chat for Wordle bot messages
+- Automatically parses messages like: `"Your group is on a 20 day streak! 🔥 Here are yesterday's results: 👑 3/6: @bela 4/6: @diego @lily 5/6: @JoshK318 @NICO"`
+- Extracts each user's score, date, and winner status (crown emoji)
+
+### 📊 **Statistical Analysis**
+- **User Statistics**: Tracks cumulative performance, average scores, win rates
+- **Daily Analysis**: Shows daily breakdowns and statistics
 - **Relative Performance**: Compares users against daily averages and personal averages
-- **Trend Analysis**: Shows recent performance trends
+- **Trend Analysis**: Shows recent performance trends with indicators
 
-## Message Format
+### 🤖 **Discord Commands**
+- `!stats` - Overall leaderboard or specific user stats
+- `!stats [username]` - Specific user statistics
+- `!daily [date]` - Daily game results and statistics (defaults to yesterday)
+- `!relative [date]` - Performance relative to averages
+- `!recent [days]` - Recent performance trends (defaults to 7 days)
+- `!ping` - Test bot connectivity
 
-The bot recognizes messages in this format:
+### 💾 **PostgreSQL Data Storage**
+- Stores data in PostgreSQL database tables
+- Scalable and reliable data persistence
+- Multi-server support with guild separation
+- Automatic database initialization
+
+## Database Schema
+
+### `wordle_scores` Table
+```sql
+CREATE TABLE wordle_scores (
+    id SERIAL PRIMARY KEY,
+    guild_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    date DATE NOT NULL,
+    is_winner BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(guild_id, username, date)
+);
 ```
-Your group is on a 20 day streak! 🔥 Here are yesterday's results:
-👑 3/6: @bela
-4/6: @diego @lily
-5/6: @JoshK318 @NICO
+
+### `user_stats` Table
+```sql
+CREATE TABLE user_stats (
+    guild_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    total_score INTEGER DEFAULT 0,
+    games_played INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, username)
+);
 ```
 
-## Commands
+## Setup Instructions
 
-### `!stats [user]`
-Show overall statistics or specific user statistics
-- Without parameter: Shows leaderboard sorted by average score
-- With username: Shows detailed stats for that user
+### 1. Prerequisites
+- Python 3.8+
+- PostgreSQL database
+- Discord bot token
 
-### `!daily [date]`
-Show daily statistics for a specific date (YYYY-MM-DD format)
-- Without parameter: Shows yesterday's stats
-- Shows player count, average score, best score, and score breakdown
+### 2. Environment Variables
+Set the following environment variables:
 
-### `!relative [date]`
-Show how users performed relative to the daily average and their personal average
-- Without parameter: Shows yesterday's relative performance
-- Useful for seeing who over/under-performed
+```bash
+# Required
+DATABASE_URL=postgresql://username:password@host:port/database_name
+BOT_TOKEN=your_discord_bot_token_here
+```
 
-### `!recent [days]`
-Show recent performance trends (default: 7 days, max: 30)
-- Shows trend indicators (📈📉➡️) comparing recent average to overall average
+### 3. Install Dependencies
+```bash
+pip install discord.py psycopg2-binary
+```
 
-### `!hello`
-Simple test command to verify bot is working
+### 4. Configuration
+Edit `config.json`:
+```json
+{
+  "command_prefix": "!",
+  "settings": {
+    "max_recent_days": 30,
+    "default_recent_days": 7,
+    "auto_save": true
+  }
+}
+```
 
-## Setup
+### 5. Database Setup
+The bot will automatically create the required tables when it starts. Make sure your PostgreSQL database exists and is accessible.
 
-1. Install dependencies:
-   ```bash
-   pip install discord.py
-   ```
+### 6. Run the Bot
+```bash
+python Wordle_Tracker.py
+```
 
-2. Update the bot token and channel ID in the code:
-   ```python
-   Bot_Token = "YOUR_BOT_TOKEN_HERE"
-   Channel_ID = YOUR_CHANNEL_ID_HERE
-   ```
+## Usage Examples
 
-3. Run the bot:
-   ```bash
-   python Wordle_Tracker.py
-   ```
+### Daily Tracking
+When a Wordle bot posts daily results, the tracker will automatically:
+1. Parse the message and extract scores
+2. Store scores with dates and winner information
+3. Update cumulative statistics for each player
+4. Confirm tracking with a message
 
-## Data Storage
+### Statistics Commands
+- `!stats` → Shows leaderboard with averages and win rates
+- `!stats bela` → Shows bela's personal statistics
+- `!daily` → Shows yesterday's results and breakdown
+- `!relative` → Shows who performed above/below average
+- `!recent 14` → Shows 14-day performance trends
 
-The bot stores data in two JSON files:
-- `wordle_data.json`: Daily scores organized by date
-- `user_stats.json`: Cumulative user statistics
+## Features
 
-These files are automatically created and updated as the bot runs.
+### Multi-Server Support
+- Each Discord server (guild) has separate data
+- Prevents cross-contamination between different groups
+- Scales to multiple servers
 
-## Customization
+### Data Integrity
+- Unique constraints prevent duplicate entries
+- Automatic conflict resolution with upserts
+- Transaction-based operations for consistency
 
-You can modify the parsing logic in `parse_wordle_message()` if your Wordle bot uses a different message format. The current implementation looks for:
-- Streak indicator: "Your group is on a X day streak!"
-- Score lines: "👑 3/6: @username" or "4/6: @user1 @user2"
-- Crown emoji (👑) indicates the winner(s)
+### Performance
+- Indexed queries for fast data retrieval
+- Efficient aggregation queries
+- Minimal database connections
 
-## Example Usage
+## Troubleshooting
 
-After the bot processes a daily Wordle message, you can use commands like:
+### Database Connection Issues
+1. Verify `DATABASE_URL` environment variable is set correctly
+2. Ensure PostgreSQL server is running and accessible
+3. Check database credentials and permissions
 
-- `!stats` - See the overall leaderboard
-- `!stats bela` - See bela's detailed statistics
-- `!daily` - See yesterday's game results
-- `!relative` - See who performed above/below their average
-- `!recent 14` - See 2-week performance trends
+### Bot Permission Issues
+1. Ensure bot has necessary Discord permissions:
+   - Read Messages
+   - Send Messages
+   - Use Slash Commands
+   - Add Reactions
 
-## Bot Permissions
+### Message Parsing Issues
+1. Check that Wordle bot messages match expected format
+2. Verify crown emoji (👑) is used for winners
+3. Ensure usernames use @ mentions
 
-The bot needs the following Discord permissions:
-- Read Messages
-- Send Messages
-- Use Slash Commands (if you want to add slash commands later)
+## Development
+
+### Testing Message Parser
+```python
+# Test the message parsing functionality
+python test_parser.py
+```
+
+### Database Queries
+The bot uses parameterized queries to prevent SQL injection and ensure data safety.
+
+### Extending Functionality
+- Add new statistics by creating new database queries
+- Extend message parsing for different Wordle bot formats
+- Add new Discord commands in the command functions
+
+## License
+
+MIT License - Feel free to modify and distribute.
