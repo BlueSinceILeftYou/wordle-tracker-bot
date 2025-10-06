@@ -468,9 +468,6 @@ def run_web():
     app.run(host='0.0.0.0', port=10000)
 
 if __name__ == "__main__":
+    init_db()
     threading.Thread(target=run_web).start()
-    bot.run(Bot_Token)
-
-if __name__ == "__main__":
-    init_db()   # Load existing data when bot starts
     bot.run(Bot_Token)
