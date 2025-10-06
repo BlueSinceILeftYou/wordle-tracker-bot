@@ -334,6 +334,22 @@ async def recent(ctx, days: int = None):
     await ctx.send(embed=embed)
 
 # Only run the bot if this file is executed directly
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Wordle Tracker Bot is running!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=10000)
+
+if __name__ == "__main__":
+    threading.Thread(target=run_web).start()
+    bot.run(Bot_Token)
+
 if __name__ == "__main__":
     load_data()  # Load existing data when bot starts
     bot.run(Bot_Token)
