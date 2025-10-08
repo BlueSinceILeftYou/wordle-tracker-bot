@@ -139,6 +139,27 @@ def update_user_stats(guild_id: str, scores: List[WordleScore]):
     conn.commit()
     conn.close()
 
+def get_user_display_name(bot, guild_id: str, user_id: str) -> str:
+    """Get a user's display name from their ID"""
+    if user_id.startswith("unresolved_"):
+        return user_id.replace("unresolved_", "")
+    
+    try:
+        guild = bot.get_guild(int(guild_id)) if guild_id != "DM" else None
+        if guild:
+            member = guild.get_member(int(user_id))
+            if member:
+                return member.display_name or member.name
+        else:
+            # Try to get user from cache
+            user = bot.get_user(int(user_id))
+            if user:
+                return user.display_name or user.name
+    except (ValueError, AttributeError):
+        pass
+    
+    return f"User#{user_id}"
+
 def get_user_stats(guild_id: str, username: str = None) -> Dict:
     """Get user statistics from the database"""
     conn = get_connection()
@@ -227,7 +248,7 @@ def get_recent_dates(guild_id: str, days: int) -> List[str]:
     return [str(row[0]) for row in results]
 
 
-def parse_wordle_message(message_content: str) -> Optional[tuple]:
+def parse_wordle_message(message_content: str, guild_members=None) -> Optional[List[WordleScore]]:
     """Parse the Wordle bot message and extract scores"""
     # Pattern to match the streak message
     streak_pattern = r"Your group is on a (\d+) day streak!"
@@ -249,16 +270,50 @@ def parse_wordle_message(message_content: str) -> Optional[tuple]:
             score = int(match.group(2))
             users_text = match.group(3).strip()
             
-            # Extract usernames (remove @ symbols)
-            users = re.findall(r'@(\w+)', users_text)
+            # Extract both Discord user mentions and plain @username mentions
+            # Discord mentions: <@user_id> or <@!user_id>
+            discord_mentions = re.findall(r'<@!?(\d+)>', users_text)
+            # Plain mentions: @username (for cases where ping failed)
+            plain_mentions = re.findall(r'@(\w+)', users_text)
             
-            for user in users:
+            # Process Discord mentions (these give us actual user IDs)
+            for user_id in discord_mentions:
                 scores.append(WordleScore(
-                    user=user,
+                    user=user_id,  # Store the actual Discord user ID
                     score=score,
-                    date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),  # Yesterday's date
+                    date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
                     is_winner=is_winner
                 ))
+            
+            # Process plain mentions (try to resolve to user IDs if possible)
+            if guild_members:
+                for username in plain_mentions:
+                    # Skip if we already found this as a Discord mention
+                    if f"@{username}" not in users_text.replace(f"<@", "DISCORD_MENTION"):
+                        # Try to find the user by display name or username
+                        matched_member = None
+                        for member in guild_members:
+                            if (member.display_name.lower() == username.lower() or 
+                                member.name.lower() == username.lower() or
+                                member.global_name and member.global_name.lower() == username.lower()):
+                                matched_member = member
+                                break
+                        
+                        if matched_member:
+                            scores.append(WordleScore(
+                                user=str(matched_member.id),
+                                score=score,
+                                date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+                                is_winner=is_winner
+                            ))
+                        else:
+                            # If we can't resolve the username, store it as-is but mark it
+                            scores.append(WordleScore(
+                                user=f"unresolved_{username}",
+                                score=score,
+                                date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+                                is_winner=is_winner
+                            ))
     
     return scores if scores else None
 
@@ -272,25 +327,53 @@ async def on_ready():
 async def ping(ctx):
     await ctx.send("✅ I'm online and ready to track Wordle scores!")
 
+@bot.command()
+async def botinfo(ctx):
+    """Show information about bots in the server (for debugging)"""
+    if not ctx.guild:
+        await ctx.send("This command only works in servers!")
+        return
+    
+    bots = [member for member in ctx.guild.members if member.bot]
+    
+    embed = discord.Embed(title="🤖 Bots in this server", color=0x0099ff)
+    
+    for bot_member in bots[:10]:  # Limit to 10 bots
+        bot_info = f"ID: {bot_member.id}\nName: {bot_member.name}\nFull: {str(bot_member)}"
+        embed.add_field(name=f"{bot_member.display_name}", value=bot_info, inline=True)
+    
+    await ctx.send(embed=embed)
+
 @bot.event
 async def on_message(message):
     # Don't respond to our own messages
     if message.author == bot.user:
         return
     
-    # Check if this is a Wordle bot message
-    if "Your group is on a" in message.content and "day streak!" in message.content:
-        scores = parse_wordle_message(message.content)
-        if scores:
-            guild_id = str(message.guild.id) if message.guild else "DM"
+    # Only respond to messages from the specific Wordle bot (Wordle #2092)
+    # You can check this by bot's user ID or discriminator
+    if (message.author.bot and 
+        (message.author.name == "Wordle" or 
+         str(message.author) == "Wordle#2092" or
+         message.author.id == 1010405497381625896)):  # Add the actual bot ID if you know it
+        
+        # Check if this is a Wordle streak message
+        if "Your group is on a" in message.content and "day streak!" in message.content:
+            # Get guild members for username resolution
+            guild_members = message.guild.members if message.guild else []
             
-            # Save scores and update stats
-            save_wordle_scores(guild_id, scores)
-            update_user_stats(guild_id, scores)
-            
-            # Send confirmation message
-            date = scores[0].date  # All scores will have the same date
-            await message.channel.send(f"📊 Recorded {len(scores)} Wordle scores for {date}!")
+            scores = parse_wordle_message(message.content, guild_members)
+            if scores:
+                guild_id = str(message.guild.id) if message.guild else "DM"
+                
+                # Save scores and update stats
+                save_wordle_scores(guild_id, scores)
+                update_user_stats(guild_id, scores)
+                
+                # Send confirmation message
+                date = scores[0].date  # All scores will have the same date
+                await message.add_reaction("✅")
+                await message.channel.send(f"📊 Recorded {len(scores)} Wordle scores for {date}!")
     
     # Process other commands
     await bot.process_commands(message)
@@ -312,25 +395,42 @@ async def stats(ctx, user: str = None):
         else:
             leaderboard = ""
             for i, stats in enumerate(all_stats[:10], 1):
-                username = stats["username"]
+                user_id = stats["username"]
+                display_name = get_user_display_name(bot, guild_id, user_id)
                 avg = stats["total_score"] / stats["games_played"] if stats["games_played"] > 0 else 0
                 win_rate = (stats["wins"] / stats["games_played"] * 100) if stats["games_played"] > 0 else 0
-                leaderboard += f"{i}. **{username}**: {avg:.2f} avg ({stats['games_played']} games, {win_rate:.1f}% wins)\n"
+                leaderboard += f"{i}. **{display_name}**: {avg:.2f} avg ({stats['games_played']} games, {win_rate:.1f}% wins)\n"
             
             embed.add_field(name="🏆 Leaderboard (Best Average)", value=leaderboard or "No data", inline=False)
         
         await ctx.send(embed=embed)
     else:
+        # Try to resolve user mention to user ID
+        resolved_user_id = user
+        if user.startswith('<@') and user.endswith('>'):
+            # Extract user ID from mention
+            resolved_user_id = user.strip('<@!>')
+        else:
+            # Try to find user by display name
+            if ctx.guild:
+                for member in ctx.guild.members:
+                    if (member.display_name.lower() == user.lower() or 
+                        member.name.lower() == user.lower() or
+                        (member.global_name and member.global_name.lower() == user.lower())):
+                        resolved_user_id = str(member.id)
+                        break
+        
         # Show specific user statistics
-        stats_data = get_user_stats(guild_id, user)
+        stats_data = get_user_stats(guild_id, resolved_user_id)
         if not stats_data:
             await ctx.send(f"No data found for user: {user}")
             return
         
+        display_name = get_user_display_name(bot, guild_id, resolved_user_id)
         avg = stats_data["total_score"] / stats_data["games_played"] if stats_data["games_played"] > 0 else 0
         win_rate = (stats_data["wins"] / stats_data["games_played"] * 100) if stats_data["games_played"] > 0 else 0
         
-        embed = discord.Embed(title=f"📊 {user}'s Wordle Statistics", color=0x00ff00)
+        embed = discord.Embed(title=f"📊 {display_name}'s Wordle Statistics", color=0x00ff00)
         embed.add_field(name="Games Played", value=stats_data["games_played"], inline=True)
         embed.add_field(name="Average Score", value=f"{avg:.2f}", inline=True)
         embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%", inline=True)
@@ -358,12 +458,13 @@ async def daily(ctx, date: str = None):
     embed.add_field(name="Average Score", value=f"{daily_stats['average']:.2f}", inline=True)
     embed.add_field(name="Best Score", value=daily_stats["best_score"], inline=True)
     
-    # Show individual scores
+    # Show individual scores with display names
     score_breakdown = {}
     for score in scores:
         if score.score not in score_breakdown:
             score_breakdown[score.score] = []
-        score_breakdown[score.score].append(score.user)
+        display_name = get_user_display_name(bot, guild_id, score.user)
+        score_breakdown[score.score].append(display_name)
     
     breakdown_text = ""
     for score in sorted(score_breakdown.keys()):
@@ -400,16 +501,17 @@ async def relative(ctx, date: str = None):
         user_avg = get_user_average(guild_id, score.user)
         relative_to_daily = score.score - daily_avg
         relative_to_personal = score.score - user_avg
-        relative_scores.append((score.user, score.score, relative_to_daily, relative_to_personal))
+        display_name = get_user_display_name(bot, guild_id, score.user)
+        relative_scores.append((display_name, score.score, relative_to_daily, relative_to_personal))
     
     # Sort by performance relative to daily average
     relative_scores.sort(key=lambda x: x[2])
     
     performance_text = ""
-    for user, score, rel_daily, rel_personal in relative_scores:
+    for display_name, score, rel_daily, rel_personal in relative_scores:
         daily_indicator = "📈" if rel_daily > 0 else "📉" if rel_daily < 0 else "➡️"
         personal_indicator = "📈" if rel_personal > 0 else "📉" if rel_personal < 0 else "➡️"
-        performance_text += f"**{user}**: {score}/6 {daily_indicator} {rel_daily:+.2f} vs daily, {personal_indicator} {rel_personal:+.2f} vs personal avg\n"
+        performance_text += f"**{display_name}**: {score}/6 {daily_indicator} {rel_daily:+.2f} vs daily, {personal_indicator} {rel_personal:+.2f} vs personal avg\n"
     
     embed.add_field(name="Performance Analysis", value=performance_text or "No data", inline=False)
     
@@ -443,31 +545,19 @@ async def recent(ctx, days: int = None):
             user_trends[score.user].append(score.score)
     
     trend_text = ""
-    for user, scores in user_trends.items():
+    for user_id, scores in user_trends.items():
         if len(scores) >= 2:
             recent_avg = sum(scores[-3:]) / len(scores[-3:])  # Last 3 games
             overall_avg = sum(scores) / len(scores)
             trend = "📈" if recent_avg > overall_avg else "📉" if recent_avg < overall_avg else "➡️"
-            trend_text += f"**{user}**: {len(scores)} games, recent avg: {recent_avg:.2f} {trend}\n"
+            display_name = get_user_display_name(bot, guild_id, user_id)
+            trend_text += f"**{display_name}**: {len(scores)} games, recent avg: {recent_avg:.2f} {trend}\n"
     
     embed.add_field(name="User Trends", value=trend_text or "No trends available", inline=False)
     
     await ctx.send(embed=embed)
 
 # Only run the bot if this file is executed directly
-from flask import Flask
-import threading
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "✅ Wordle Tracker Bot is running!"
-
-def run_web():
-    app.run(host='0.0.0.0', port=10000)
-
 if __name__ == "__main__":
     init_db()
-    threading.Thread(target=run_web).start()
     bot.run(Bot_Token)
