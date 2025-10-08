@@ -276,7 +276,7 @@ def parse_wordle_message(message_content: str, guild_members=None) -> Optional[L
             # Plain mentions: @username (for cases where ping failed)
             plain_mentions = re.findall(r'@(\w+)', users_text)
             
-            # Process Discord mentions (these give us actual user IDs)
+            # Process Discord mentions 
             for user_id in discord_mentions:
                 scores.append(WordleScore(
                     user=user_id,  # Store the actual Discord user ID
@@ -351,12 +351,7 @@ async def on_message(message):
         return
     
     # Only respond to messages from the specific Wordle bot (Wordle #2092)
-    # You can check this by bot's user ID or discriminator
-    if (message.author.bot and 
-        (message.author.name == "Wordle" or 
-         str(message.author) == "Wordle#2092" or
-         message.author.id == 1010405497381625896)):  # Add the actual bot ID if you know it
-        
+    if (message.author.id == 1211781489931452447): 
         # Check if this is a Wordle streak message
         if "Your group is on a" in message.content and "day streak!" in message.content:
             # Get guild members for username resolution
