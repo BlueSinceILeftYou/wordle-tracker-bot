@@ -139,6 +139,81 @@ def update_user_stats(guild_id: str, scores: List[WordleScore]):
     conn.commit()
     conn.close()
 
+def resolve_username_to_user_id(bot, guild, username: str) -> str:
+    """
+    Resolve a username to a Discord user ID. Try multiple resolution strategies.
+    Returns the user ID as a string, or f"unresolved_{username}" if resolution fails.
+    """
+    if not guild:
+        return f"unresolved_{username}"
+    
+    username_lower = username.lower()
+    
+    # Try to find the user by display name, username, or global name
+    for member in guild.members:
+        if (member.display_name.lower() == username_lower or 
+            member.name.lower() == username_lower or
+            (member.global_name and member.global_name.lower() == username_lower)):
+            return str(member.id)
+    
+    # Try partial matching (in case of nickname changes)
+    for member in guild.members:
+        if (username_lower in member.display_name.lower() or
+            username_lower in member.name.lower() or
+            (member.global_name and username_lower in member.global_name.lower())):
+            return str(member.id)
+    
+    # If all resolution attempts fail, store as unresolved
+    return f"unresolved_{username}"
+
+def resolve_pending_usernames(guild):
+    """
+    Attempt to resolve any 'unresolved_' usernames in the database to actual user IDs.
+    Call this periodically or when new members join to clean up old unresolved entries.
+    """
+    if not guild:
+        return
+    
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Find all unresolved usernames in the database
+    cur.execute("""
+        SELECT DISTINCT username FROM wordle_scores 
+        WHERE guild_id = %s AND username LIKE 'unresolved_%'
+        UNION
+        SELECT DISTINCT username FROM user_stats 
+        WHERE guild_id = %s AND username LIKE 'unresolved_%'
+    """, (str(guild.id), str(guild.id)))
+    
+    unresolved_entries = cur.fetchall()
+    
+    for entry in unresolved_entries:
+        old_username = entry['username']
+        actual_username = old_username.replace('unresolved_', '')
+        
+        # Try to resolve to actual user ID
+        new_user_id = resolve_username_to_user_id(None, guild, actual_username)
+        
+        # If we successfully resolved it and it's not still unresolved
+        if not new_user_id.startswith('unresolved_'):
+            # Update wordle_scores table
+            cur.execute("""
+                UPDATE wordle_scores 
+                SET username = %s 
+                WHERE guild_id = %s AND username = %s
+            """, (new_user_id, str(guild.id), old_username))
+            
+            # Update user_stats table  
+            cur.execute("""
+                UPDATE user_stats 
+                SET username = %s 
+                WHERE guild_id = %s AND username = %s
+            """, (new_user_id, str(guild.id), old_username))
+    
+    conn.commit()
+    conn.close()
+
 def get_user_display_name(bot, guild_id: str, user_id: str) -> str:
     """Get a user's display name from their ID"""
     if user_id.startswith("unresolved_"):
@@ -248,7 +323,7 @@ def get_recent_dates(guild_id: str, days: int) -> List[str]:
     return [str(row[0]) for row in results]
 
 
-def parse_wordle_message(message_content: str, guild_members=None) -> Optional[List[WordleScore]]:
+def parse_wordle_message(message_content: str, guild=None) -> Optional[List[WordleScore]]:
     """Parse the Wordle bot message and extract scores"""
     # Pattern to match the streak message
     streak_pattern = r"Your group is on a (\d+) day streak!"
@@ -286,34 +361,17 @@ def parse_wordle_message(message_content: str, guild_members=None) -> Optional[L
                 ))
             
             # Process plain mentions (try to resolve to user IDs if possible)
-            if guild_members:
-                for username in plain_mentions:
-                    # Skip if we already found this as a Discord mention
-                    if f"@{username}" not in users_text.replace(f"<@", "DISCORD_MENTION"):
-                        # Try to find the user by display name or username
-                        matched_member = None
-                        for member in guild_members:
-                            if (member.display_name.lower() == username.lower() or 
-                                member.name.lower() == username.lower() or
-                                member.global_name and member.global_name.lower() == username.lower()):
-                                matched_member = member
-                                break
-                        
-                        if matched_member:
-                            scores.append(WordleScore(
-                                user=str(matched_member.id),
-                                score=score,
-                                date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
-                                is_winner=is_winner
-                            ))
-                        else:
-                            # If we can't resolve the username, store it as-is but mark it
-                            scores.append(WordleScore(
-                                user=f"unresolved_{username}",
-                                score=score,
-                                date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
-                                is_winner=is_winner
-                            ))
+            for username in plain_mentions:
+                # Skip if we already found this as a Discord mention
+                if f"@{username}" not in users_text.replace(f"<@", "DISCORD_MENTION"):
+                    # Use the new resolution function
+                    user_id = resolve_username_to_user_id(bot, guild, username)
+                    scores.append(WordleScore(
+                        user=user_id,
+                        score=score,
+                        date=(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+                        is_winner=is_winner
+                    ))
     
     return scores if scores else None
 
@@ -322,6 +380,11 @@ def parse_wordle_message(message_content: str, guild_members=None) -> Optional[L
 async def on_ready():
     print(f"✅ {bot.user} is online and ready!")
     init_db()  # Initialize database when bot starts
+
+@bot.event
+async def on_member_join(member):
+    """When a new member joins, try to resolve any pending unresolved usernames"""
+    resolve_pending_usernames(member.guild)
 
 @bot.command()
 async def ping(ctx):
@@ -354,10 +417,7 @@ async def on_message(message):
     if (message.author.id == 1211781489931452447): 
         # Check if this is a Wordle streak message
         if "Your group is on a" in message.content and "day streak!" in message.content:
-            # Get guild members for username resolution
-            guild_members = message.guild.members if message.guild else []
-            
-            scores = parse_wordle_message(message.content, guild_members)
+            scores = parse_wordle_message(message.content, message.guild)
             if scores:
                 guild_id = str(message.guild.id) if message.guild else "DM"
                 
@@ -551,6 +611,16 @@ async def recent(ctx, days: int = None):
     embed.add_field(name="User Trends", value=trend_text or "No trends available", inline=False)
     
     await ctx.send(embed=embed)
+
+@bot.command()
+async def cleanup(ctx):
+    """Manually resolve any pending unresolved usernames"""
+    if not ctx.guild:
+        await ctx.send("This command can only be used in a server.")
+        return
+    
+    resolve_pending_usernames(ctx.guild)
+    await ctx.send("✅ Attempted to resolve any pending unresolved usernames.")
 
 # Only run the bot if this file is executed directly
 if __name__ == "__main__":
