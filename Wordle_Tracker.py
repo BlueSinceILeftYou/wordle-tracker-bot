@@ -196,20 +196,73 @@ def resolve_pending_usernames(guild):
         new_user_id = resolve_username_to_user_id(None, guild, actual_username)
         
         # If we successfully resolved it and it's not still unresolved
-        if not new_user_id.startswith('unresolved_'):
-            # Update wordle_scores table
+        if not new_user_id.startswith('unresolved_') and new_user_id != old_username:
+            # For wordle_scores: Delete entries with the new_user_id that conflict, then update
+            # This handles the case where both unresolved_ and actual user_id entries exist
+            cur.execute("""
+                DELETE FROM wordle_scores 
+                WHERE guild_id = %s AND username = %s 
+                AND date IN (
+                    SELECT date FROM wordle_scores 
+                    WHERE guild_id = %s AND username = %s
+                )
+            """, (str(guild.id), new_user_id, str(guild.id), old_username))
+            
+            # Now update the old entries to use the new user ID
             cur.execute("""
                 UPDATE wordle_scores 
                 SET username = %s 
                 WHERE guild_id = %s AND username = %s
             """, (new_user_id, str(guild.id), old_username))
             
-            # Update user_stats table  
+            # For user_stats: Merge the stats if both exist
+            # First, get existing stats for the new_user_id (if any)
             cur.execute("""
-                UPDATE user_stats 
-                SET username = %s 
+                SELECT total_score, games_played, wins 
+                FROM user_stats 
                 WHERE guild_id = %s AND username = %s
-            """, (new_user_id, str(guild.id), old_username))
+            """, (str(guild.id), new_user_id))
+            
+            existing_stats = cur.fetchone()
+            
+            # Get stats for the old username
+            cur.execute("""
+                SELECT total_score, games_played, wins 
+                FROM user_stats 
+                WHERE guild_id = %s AND username = %s
+            """, (str(guild.id), old_username))
+            
+            old_stats = cur.fetchone()
+            
+            if old_stats:
+                if existing_stats:
+                    # Merge: sum up the stats
+                    cur.execute("""
+                        UPDATE user_stats 
+                        SET total_score = %s,
+                            games_played = %s,
+                            wins = %s,
+                            last_updated = CURRENT_TIMESTAMP
+                        WHERE guild_id = %s AND username = %s
+                    """, (
+                        existing_stats['total_score'] + old_stats['total_score'],
+                        existing_stats['games_played'] + old_stats['games_played'],
+                        existing_stats['wins'] + old_stats['wins'],
+                        str(guild.id),
+                        new_user_id
+                    ))
+                    # Delete the old entry
+                    cur.execute("""
+                        DELETE FROM user_stats 
+                        WHERE guild_id = %s AND username = %s
+                    """, (str(guild.id), old_username))
+                else:
+                    # Just update the username
+                    cur.execute("""
+                        UPDATE user_stats 
+                        SET username = %s 
+                        WHERE guild_id = %s AND username = %s
+                    """, (new_user_id, str(guild.id), old_username))
     
     conn.commit()
     conn.close()
