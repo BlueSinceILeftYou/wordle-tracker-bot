@@ -7,7 +7,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubunut-latest
 
     steps:
       - name: Checkout repository
@@ -20,8 +20,8 @@ jobs:
 
       - name: Deploy to EC2 and restart bot
         run: |
-          ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
-            cd /home/ubuntu/wordle-tracker-bot
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} << 'EOF'
+            cd /home/ec2-user/wordle-tracker-bot
             git fetch origin main
             git reset --hard origin/main
             python3 -m venv venv
