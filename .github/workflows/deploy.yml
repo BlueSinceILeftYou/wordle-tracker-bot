@@ -1,0 +1,32 @@
+name: Deploy Wordle Tracker Bot
+
+on:
+  push:
+    branches:
+      - postgres-version
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+      - name: Deploy to EC2 and restart bot
+        run: |
+          ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            cd /home/ubuntu/wordle-tracker-bot
+            git fetch origin main
+            git reset --hard origin/main
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install -r requirements.txt
+            pm2 restart wordle-bot || pm2 start Wordle_Tracker.py --name wordle-bot --interpreter python3
+          EOF
+ 
