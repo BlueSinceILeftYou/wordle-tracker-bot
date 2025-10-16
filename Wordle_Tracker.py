@@ -144,6 +144,10 @@ def resolve_username_to_user_id(bot, guild, username: str) -> str:
     Resolve a username to a Discord user ID. Try multiple resolution strategies.
     Returns the user ID as a string, or f"unresolved_{username}" if resolution fails.
     """
+    # If it's already a numeric user ID, return it as-is
+    if username.isdigit():
+        return username
+    
     if not guild:
         return f"unresolved_{username}"
     
@@ -192,8 +196,12 @@ def resolve_pending_usernames(guild):
         old_username = entry['username']
         actual_username = old_username.replace('unresolved_', '')
         
-        # Try to resolve to actual user ID
-        new_user_id = resolve_username_to_user_id(None, guild, actual_username)
+        # If the "unresolved" entry is already a numeric user ID, just use it directly
+        if actual_username.isdigit():
+            new_user_id = actual_username
+        else:
+            # Try to resolve to actual user ID
+            new_user_id = resolve_username_to_user_id(None, guild, actual_username)
         
         # If we successfully resolved it and it's not still unresolved
         if not new_user_id.startswith('unresolved_') and new_user_id != old_username:
