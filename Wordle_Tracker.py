@@ -680,8 +680,14 @@ async def cleanup(ctx):
         await ctx.send("This command can only be used in a server.")
         return
     
-    resolve_pending_usernames(ctx.guild)
-    await ctx.send("✅ Attempted to resolve any pending unresolved usernames.")
+    try:
+        resolve_pending_usernames(ctx.guild)
+        await ctx.send("✅ Attempted to resolve any pending unresolved usernames.")
+    except Exception as e:
+        await ctx.send(f"❌ Error during cleanup: {str(e)}")
+        print(f"Error in cleanup: {e}")
+        import traceback
+        traceback.print_exc()
 
 # Only run the bot if this file is executed directly
 if __name__ == "__main__":
