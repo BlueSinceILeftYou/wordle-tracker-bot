@@ -674,7 +674,7 @@ async def recent(ctx, days: int = None):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def cleanup(ctx):
+async def resolveusers(ctx):
     """Manually resolve any pending unresolved usernames"""
     if not ctx.guild:
         await ctx.send("This command can only be used in a server.")
