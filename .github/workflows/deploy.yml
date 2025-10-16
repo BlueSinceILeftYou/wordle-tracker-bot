@@ -22,8 +22,9 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_HOST }} << 'EOF'
             cd /home/ec2-user/wordle-tracker-bot
-            git fetch origin main
-            git reset --hard origin/main
+            cd /home/ec2-user/wordle-tracker-bot
+            git fetch origin postgres-version
+            git reset --hard origin/postgres-version
             python3 -m venv venv
             source venv/bin/activate
             pip install -r requirements.txt
